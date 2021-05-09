@@ -54,13 +54,3 @@ point2vec = {0: (0, -1),
              }
 
 
-class Message:
-    def __init__(self, messageType, data):
-        self.messageType = messageType
-        self.data = data
-
-    def print(self):
-        print([self.messageType, self.data])
-
-    def read(self):
-        return self.data

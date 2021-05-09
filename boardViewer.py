@@ -1,12 +1,39 @@
 import pygame
 import numpy as np
 from common import *
-from network import Network
 import csv
+from network import Client
+from _thread import *
 
-boardSize = (0, 0)
+
+# display settings
 blockSize = 20
 borderSize = 2
+
+
+# # paired down boat class for drawing
+class Boat:
+    def __init__(self, attr):
+        self.pos, self.heading, self.spinnaker, self.colour = attr
+
+    def update(self, attr):     # attr = [pos, heading, spinnaker]
+        self.pos, self.heading, self.spinnaker = attr
+
+    def blankets(self, wind):
+        if self.spinnaker:
+            blanketRange = [1, 2]
+        else:
+            blanketRange = [1]
+        return [tuple(map(lambda x, y: x - i*y, self.pos, point2vec[wind])) for i in blanketRange]
+
+
+# paired down buoy class
+class Buoy:
+    def __init__(self, attr):
+        self.pos, self.isFinish = attr
+
+    def update(self, attr):
+        self.pos, self.isFinish = attr
 
 
 def draw_asset(asset, centre, scale=1.0, rotation=0.0, colour=colours['black'], lineWidth=0, boundingBox=None):
@@ -17,7 +44,6 @@ def draw_asset(asset, centre, scale=1.0, rotation=0.0, colour=colours['black'], 
         return min(scales)
 
     imgOut = []
-    rotImg = []
     rotMatrix = np.array([[np.cos(rotation), -np.sin(rotation)],  # rotation matrix
                           [np.sin(rotation), np.cos(rotation)]])
     if boundingBox is not None:
@@ -28,124 +54,131 @@ def draw_asset(asset, centre, scale=1.0, rotation=0.0, colour=colours['black'], 
 
 
 def create_map(file):
-    global boardSize #! do something about this
-    terrainKey = {'0': 'sea',
-                  '1': 'land',
-                  '2': 'buoy'
-                  }
     with open(file, newline='') as f:
         reader = csv.reader(f)
-        terrain = list(reader)
-    boardSize = [len(terrain[0]), len(terrain)]
-    board = []
-    for x in range(boardSize[0]):   #! using list comprehension would be nicer
-        board.append([])
-        for y in range(boardSize[1]):
-            board[x].append([terrainKey[terrain[y][x]]])
-    return board
+        terra = list(map(lambda *x: list(x), *list(reader)))  # makes addressing [x][y]
+    size = [len(terra), len(terra[0])]
+    return size, terra
+
+
+def coord2pixel(pos, corner='topLeft'):
+    switch = {'topLeft': (pos[0] * (blockSize + borderSize) + borderSize, pos[1] * (blockSize + borderSize) + borderSize),
+              'centre':  ((pos[0] + 0.5)*blockSize + (pos[0] + 1)*borderSize, (pos[1] + 0.5)*blockSize + (pos[1] + 1)*borderSize)
+              }
+    return switch[corner]
+
+
+def point2radians(point):
+    return point*(np.pi/4)
 
 
 def draw_board():
-    global window
-
-    def coord2pixel(pos, corner='topLeft'):
-        switch = {'topLeft': (pos[0] * (blockSize + borderSize) + borderSize, pos[1] * (blockSize + borderSize) + borderSize),
-                  'centre':  ((pos[0] + 0.5)*blockSize + (pos[0] + 1)*borderSize, (pos[1] + 0.5)*blockSize + (pos[1] + 1)*borderSize)
-                  }
-        return switch[corner]
-
-    def draw_terrain(start=(0, 0), end=boardSize):
+    def draw_terrain(start=(0, 0), end=None):
+        colourKey = {'0': colours['sea'],
+                     '1': colours['land']}
+        if end is None:
+            end = boardSize
         for x in range(start[0], end[0]):
             for y in range(start[1], end[1]):
                 rect = pygame.Rect(coord2pixel((x, y)), (blockSize, blockSize))
-                pygame.draw.rect(window, colours[terrain[x][y][0]], rect)
+                pygame.draw.rect(window, colourKey[terrain[x][y]], rect)
+
 
     def draw_boats(flotilla):
-        #! should handle boats as objects
+        global wind
         # draw all blankets first to prevent overdrawing
-        for boat in flotilla:
-            blankets = [tuple(map(lambda x, y: x - y, boat, point2vec[wind]))]
-            # if boat.spinnaker:
-            #     blankets.append(tuple(map(lambda x, y: x - y, blankets[0], point2vec[wind])))
-            for pos in blankets:
+        blankets = []                       # get all blankets
+        for boat in flotilla.values():
+            blankets += boat.blankets(wind)
+        for pos in blankets:                # draw blankets
+            if terrain[pos[0]][pos[1]] != '1':
                 rect = pygame.Rect(coord2pixel(pos), (blockSize, blockSize))
                 pygame.draw.rect(window, colours['blanketed'], rect)
-        for boat in flotilla:
-            draw_asset(assets['boat'], coord2pixel(boat, 'centre'), boundingBox=[blockSize-3]*2)
-        # for boat in flotilla:
-        #     draw_asset(assets['boat'], coord2pixel(boat.pos, 'centre'), rotation=boat.heading, colour= boat.colour )
+        for boat in flotilla.values():      # draw boats
+            draw_asset(assets['boat'], coord2pixel(boat.pos, 'centre'), rotation=point2radians(boat.heading), colour=boat.colour, boundingBox=[blockSize]*2)
 
-    def draw_buoys(buoys):  #! doesn't really need to be a function
-        for buoy in buoys:
-            draw_asset(assets['buoy'], coord2pixel(buoy, 'centre'), boundingBox=[blockSize - 5]*2, colour=colours['buoy'])
+
+    def draw_buoys(buoys):
+        for buoy in buoys.values():
+            if buoy.isFinish:     # if buoy is finish line
+                colour = (255,255,255)
+            else:
+                colour = colours['buoy']
+            draw_asset(assets['buoy'], coord2pixel(buoy.pos, 'centre'), boundingBox=[blockSize - 5]*2, colour=colour)
 
     draw_terrain()
-    wind = 7
-    draw_boats([(0, 10), (1, 11), (2, 12)])
-    draw_buoys([(0, 0), (1, 1), (2, 2)])
+    draw_boats(flotilla)
+    draw_buoys(buoys)
 
+def threaded_listen(connection):
+    def upd_wind(data):     # data = windPoint
+        global wind
+        wind = data
 
-def threaded_listen():
+    def upd_boat(data):     # data = [boatID, pos, heading, spinnaker, colour]
+        global flotilla
+        flotilla.update({data[0]: Boat(data[1:5])})
+
+    # def upd_buoy(data):     # data = [buoyID, pos, isFinish]
+    #     global buoyList
+    #     buoyList.update()
+
+    switch = {'wind': upd_wind,
+              'boat': upd_boat,
+              # 'buoy': upd_buoy
+              }
+    while run:
+        update = connection.listen()    # update has form [property, value]
+        if update is not None:
+            switch[update[0]](update[1])
+            print(update)
+            draw_board()
     pass
     # listen for updates
 
 
-def main():
-    run = True
-    if n.connected:
-        draw_board()
-        while run:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    run = False
-                    pygame.quit()
+########################################################
+# make connection to server
+n = Client()
+clientID = n.connect('viewer')
+# get initial game values
+mapPath, boatList, buoyList, wind = n.send('get', 'initial')
+# boats are received as [boatID, pos, heading, spinnaker, colour]
+# buoys are received as [buoyID, pos, isFinish]
+# create board
+boardSize, terrain = create_map(mapPath)
+# create flotilla
+flotilla = {boat[0]: Boat(boat[1:5]) for boat in boatList}
+buoys = {buoy[0]: Buoy(buoy[1:3]) for buoy in buoyList}
 
-                if event.type == pygame.MOUSEBUTTONDOWN:
-                    draw_board()
-            pygame.display.update()
-    else:
-        print("could not connect")
-    threaded_listen()
-
-
-########################################################################################################################
+# initialise pygame window
 pygame.init()
-n = Network()
-clientID = n.connect()
-if n.connected:
-    print('connected')
-    n.send('join', 0)
-    print('DEBUG: joined')
-    # get initial values
-    print('DEBUG: get mapPath')
-    mapPath = n.send('get', 'mapPath')
-    print(mapPath)
-    print('DEBUG: get boats')
-    boats = n.send('get', 'boats')
-    print('DEBUG: get buoys')
-    buoys = n.send('get', 'buoys')
-    print('DEBUG: get wind')
-    wind = n.send('get', 'wind')
-    # ^collate this into one get request
-    print('DEBUG: make terrain')
-    terrain = create_map(mapPath)
-    window = pygame.display.set_mode(tuple(i * (blockSize + borderSize) + borderSize for i in boardSize))
-    pygame.display.set_caption("boardViewer")
-    window.fill(colours['viewerBackground'])
-    main()
+window = pygame.display.set_mode(tuple(i * (blockSize + borderSize) + borderSize for i in boardSize))
+pygame.display.set_caption("boardViewer")
+window.fill(colours['viewerBackground'])
 
+################################
+#         for testing          #
+#
+# buoys = {0: Buoy([(0, 6), False]),
+#          1: Buoy([(10, 4), False]),
+#          2: Buoy([(9, 3), True])
+#          }
+# flotilla = {0: Boat([(1, 20), 3, True, (0, 0, 0)]),
+#             1: Boat([(5, 6), 1, True, (0, 100, 0)]),
+#             2: Boat([(10, 10), 7, False, (0, 200, 0)]),
+#             }
+################################
+# draw board
+draw_board()
+run = True
+start_new_thread(threaded_listen, (n, ))
+while run:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            run = False
+    pygame.display.update()
+else:
+    print("could not connect")
 
-# pygame.init()
-# terrain = create_map('boards/testMap.csv')
-# boats = {}
-# buoys = {}
-# window = pygame.display.set_mode(tuple(i * (blockSize + borderSize) + borderSize for i in boardSize))
-# pygame.display.set_caption("boardViewer")
-# window.fill(colours['viewerBackground'])
-# main()
-
-
-# listen for updates
-# if update:
-#     draw board
-#     draw players

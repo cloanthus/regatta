@@ -3,7 +3,7 @@ import numpy as np
 from common import *
 import subprocess
 import glob
-from network import Network
+from network import Client
 
 
 class Button:
@@ -220,7 +220,10 @@ def welcome_screen():
 
                 if BtnConnect.click(clickPos):
                     try:
-                        clientID = n.connect()
+                        if isUmpire:
+                            clientID = n.connect('umpire')
+                        else:
+                            clientID = n.connect('player')
                         print(clientID)
                         if n.connected:
                             print('connected')
@@ -229,10 +232,10 @@ def welcome_screen():
                     except Exception as e:
                         print(e)
                     if n.connected:
-                        if isUmpire:
-                            n.send('id', 'umpire')
-                        else:
-                            n.send('id', 'player')
+                    #     if isUmpire:
+                    #         n.send('id', 'umpire')
+                    #     else:
+                    #         n.send('id', 'player')
                         return isUmpire
                     else:
                         print("connection failed, retry")
@@ -242,56 +245,6 @@ def welcome_screen():
 
 
 def lobby_screen():
-    def lobby():
-        run = True
-        window.fill(colours['clientBackground'])
-
-        rooms = n.send('get', 'rooms')  # sometimes gets stuck in loop here, but can't reliably reproduce
-        roomChoice = RadioButton([room[1] for room in rooms], (5, 50))
-        texts = [Text("Game Lobby", (0, 0), 40, bold=True, italic=True)]
-        btnRefresh = Button("refresh", (195, 50), (100, 50), textSize=20)
-        btnJoin = Button("join", (195, 105), (100, 50), textSize=20)
-
-        def draw_screen():
-            window.fill(colours['clientBackground'])
-            if roomChoice.state is None:
-                btnJoin.enabled = False
-            else:
-                btnJoin.enabled = True
-            btnRefresh.draw(window)
-            btnJoin.draw(window)
-
-            for text in texts:
-                text.draw(window)
-
-            roomChoice.options = ([room[1] for room in rooms])
-            roomChoice.draw(window)
-
-        draw_screen()
-        while run:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    run = False
-                    pygame.quit()
-
-                if event.type == pygame.MOUSEBUTTONDOWN:
-                    clickPos = pygame.mouse.get_pos()
-                    if roomChoice.click(clickPos):
-                        if roomChoice.state is not None:
-                            btnJoin.enabled = True
-                            btnJoin.draw(window)
-                        print(roomChoice.state)
-                    if btnJoin.click(clickPos):
-                        roomID = rooms[roomChoice.state][0]
-                        n.send('join', roomID)
-                        print("connecting to game")
-                        return roomID
-                    if btnRefresh.click(clickPos):
-                        rooms = n.send('get', 'rooms')
-                        roomChoice.state = None
-                        draw_screen()
-            pygame.display.update()
-
     def room():
         def draw_flotilla(flotilla, pos):
             xShift = 0
@@ -363,18 +316,13 @@ def lobby_screen():
                         # send "ready"
                         # get reply
                         print("waiting for other players")
-                        #listen for "all ready"
+                        # listen for "all ready"
                         return
             pygame.display.update()
 
-    roomID = lobby()
-    room()
-    return roomID
-
 
 def player_console():
-    # open boardViewer
-    subprocess.Popen(['python', 'boardViewer.py'])  # should pass it a game id
+    subprocess.Popen(['python', 'boardViewer.py'])
     run = True
     window.fill(colours['clientBackground'])
 
@@ -419,12 +367,14 @@ def player_console():
     for i in range(len(compassRose)):
         buttonLookup.update({i: compassRose[i]})
 
-    texts = [Text("puffs left: " + str(2), (195, 8), 20),   # (97, 20)
-             Text("legs left: " + str(5), (203, 30), 20)]   # (89, 20)
+    texts = [Text("puffs left: X", (195, 8), 20),   # (97, 20)
+             Text("legs left: X", (203, 30), 20)]   # (89, 20)
 
     def draw_console(win):
         # get valid buttons
-        validBtns = n.send('get', 'moves')
+        validBtns = None
+        while validBtns is None:
+            validBtns = n.send('get', 'moves')
         # set usable buttons
         for btnKey in buttonLookup:
             if btnKey in validBtns:
@@ -460,11 +410,40 @@ def player_console():
 
     ##########################################################
     draw_console(window)
+
     while run:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 run = False
                 pygame.quit()
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                clickPos = pygame.mouse.get_pos()
+
+                for btn in compassRose:
+                    if btn.click(clickPos):
+                        n.send('move', compassRose.index(btn))
+                        print(compassRose.index(btn))
+
+                for btn in sailControls:
+                    if btn.click(clickPos):
+                        if btn.text == 'port' or btn.text == 'star.':
+                            n.send('move', 'tack')
+                        else:
+                            n.send('move', btn.text)
+                        print(btn.text)
+
+                if btnDice.click(clickPos):
+                    n.send('move', 'roll')
+                    print('roll dice')
+
+                if btnEnd.click(clickPos):
+                    n.send('move', 'end')
+                    print('end turn')
+
+                draw_console(window)
+
+
         pygame.display.update()
 
 
@@ -535,7 +514,7 @@ window = pygame.display.set_mode(winSize)
 pygame.display.set_caption("client")
 window.fill(colours['clientBackground'])
 running = True
-n = Network()
+n = Client()
 clientID = None
 isUmpire = welcome_screen()
 print(clientID)

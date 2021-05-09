@@ -1,120 +1,82 @@
-import socket
 from _thread import *
-import pickle
-from game import *
-from common import Message
+from game import Game
+from network import *
+import time
 
-roomCounter = 0
 connCounter = 0
 connLookup = {}
-lobby = []
-rooms = []
+viewerLookup = {}
+playerLookup = {}
 
 
 class Client:
-    def __init__(self, connection, clientID):
-        self.connection = connection
-        self.clientID = clientID
-        self.room = None
+    def __init__(self, conn, connID):
+        self.conn = conn
+        self.connID = connID
 
-    def send(self, mess):
-        self.connection.sendall(pickle.dumps(mess))
+    def send(self, messType, messData):
+        self.conn.sendall(pickle.dumps(Message(messType, messData)))
+        print('DEBUG: sent:', messType, messData)
 
-
-class Umpire(Client):
-    def __init__(self, connection, clientID):
-        super().__init__(connection, clientID)
-
-
-
-    def handle_message(self, mess):
-        def make_room():
-            global rooms, roomCounter
-            mapPath, name = mess.data
-            rooms.append(Room(self, mapPath, roomCounter, name=name))
-            roomCounter += 1
-            print(rooms)
-
-        switchType = {'make': make_room}
-        switchType[mess.messageType]()
 
 class Viewer(Client):
-    def __init__(self, connection, clientID):
-        super().__init__(connection, clientID)
-        self.boat = None
+    def __init__(self, conn, connID):
+        super().__init__(conn, connID)
+        viewerLookup.update({connID: self})
 
     def handle_message(self, mess):
-        def handle_get():
-            switch = {'mapPath': self.room.mapPath,
-                      'boats':  [boat.get_attr() for boat in self.room.game.flotilla],
-                      'buoys': [buoy.get_attr() for buoy in self.room.game.buoys],
-                      'wind': self.room.game.wind
+        def give(request):
+            switchReq = {'initial': [game.mapPath,
+                                     [boat.get_attr() for boat in game.boats],
+                                     [buoy.get_attr() for buoy in game.buoys],
+                                     game.wind],
+                         }
+            self.send('give', switchReq[request])
+
+        switchType = {'get': give
+                      # 'join':
                       }
-            reply = Message('give', switch[mess.data])
-            self.send(reply)
-
-        def handle_join():
-            room = find_room(mess.data)
-            room.join(self)
-
-
-        switchType = {'get': handle_get,
-                      'join': handle_join,
-                      # 'move': handle_move,
-                      }
-        switchType[mess.messageType]()
+        switchType[mess.messageType](mess.data)
 
 
 class Player(Client):
-    def __init__(self, connection, clientID):
-        super().__init__(connection, clientID)
-        self.room = None
+    def __init__(self, conn, connID):
+        super().__init__(conn, connID)
+        playerLookup.update({connID: self})
+        self.boat = game.create_boat(connID, pos = (8,8))
+        print('DEBUG: player created')
+        print('DEBUG: ', self.boat)
 
     def handle_message(self, mess):
-        def handle_get():
-            # switch = {'rooms': [[room.roomID, room.name] for room in rooms],
-            #           'colours': [boat.get_colour() for boat in self.room.game.flotilla],
-            #           'moves': self.room.game.find_in_flotilla(self.clientID).get_valid_moves(),
-            #           'wind': self.room.game.wind
-            #           }
+        def give(request):
+            switchReq = {'moves': self.boat.get_valid_moves(),
+                         'colours': [boat.colour for boat in game.boats],
+                         'puffs': self.boat.puffCounter,
+                         'legs': game.dice.outcome
+                         }
+            self.send('give', switchReq[request])
 
-            # really ugly solution: with above could not create the dict when not every option was valid
-            # below tries to create each option and passes if couldn't, at four times the length :/
-            # at this point it is probably better to use a block of if, elifs
-            switch = {}
-            try:
-                switch.update({'rooms': [[room.roomID, room.name] for room in rooms]})
-            except:
-                pass
-            try:
-                switch.update({'colours': [[boat.boatID, boat.get_colour()] for boat in self.room.game.flotilla]})
-            except:
-                pass
-            try:
-                switch.update({'moves': self.room.game.find_in_flotilla(self.clientID).get_valid_moves()})
-            except:
-                pass
-            try:
-                switch.update({'wind': self.room.game.wind})
-            except:
-                pass
+        def move(action):
+            self.boat.turn(action)
+            silentMoves = ['tack', 'roll', 'spin.', 'puff', 'end']
+            if action not in silentMoves:
+                for viewer in viewerLookup.values():
+                    viewer.send('upd', ['boat', self.boat.get_attr()])
 
-            reply = Message('give', switch[mess.data])
-            self.send(reply)
+        def change(data):
+            property, value = data
+            if property == 'colour':
+                self.boat.colour = value
 
-        def handle_move():
-            pass
-
-        def handle_join():
-            room = find_room(mess.data)
-            room.join(self)
-            self.room = room    # is this circular? would it make more sense just to show room in one place?
-
-        switchType = {'get': handle_get,
-                      'join': handle_join,
-                      'move': handle_move,
+        switchType = {'get': give,
+                      'move': move,
+                      'change': change,
                       }
-        switchType[mess.messageType]()
+        switchType[mess.messageType](mess.data)
+
+
+class Umpire(Client):
+    pass
 
 
 def start_server():
@@ -126,16 +88,9 @@ def start_server():
         print("server started")
     except socket.error as e:
         print(e)
+
     sock.listen(5)
-
     return sock
-
-
-def find_room(roomID):
-    for room in rooms:
-        if room.roomID == roomID:
-            return room
-    return None
 
 
 def threaded_client(connection, connectionID):
@@ -149,13 +104,13 @@ def threaded_client(connection, connectionID):
                 break
             else:
                 if message.messageType == 'id':
-                    switch = {'player': Player(connection, connectionID),
-                              'viewer': Viewer(connection, connectionID),
-                              'umpire': Umpire(connection, connectionID)
-                              }
-                    client = switch[message.data]
+                    switchClient = {'viewer': Viewer,
+                                    'umpire': Umpire,
+                                    'player': Player,
+                                    }
+                    client = switchClient[message.data](connection, connectionID)
+                    print('DEBUG: connected as:', client.__class__.__name__)
                     identified = True
-                    print(identified, client.__class__.__name__)
         except Exception as e:
             print(e)
             break
@@ -165,17 +120,15 @@ def threaded_client(connection, connectionID):
             if not message:
                 break
             else:
-                message.print()
+                print('DEBUG: received:', message.messageType, message.data)
                 client.handle_message(message)
+                pass
         except Exception as e:
             print(e)
             break
 
     print("Lost connection")
     try:
-        if client.__class__.__name__ == 'Umpire':
-            # delete the room they started
-            pass
         del client
     except Exception as e:
         print(e)
@@ -183,10 +136,36 @@ def threaded_client(connection, connectionID):
     del connLookup[connectionID]
 
 
+# def test_movement(cat):
+#     cat = 1
+#     while True:
+#         try:
+#             for viewer in viewerLookup.values():
+#                 viewer.send('upd', ['wind', 1])
+#                 viewer.send('upd', ['boat', [0, (10, 10), 3, False, (255, 255, 0)]])
+#             print(['wind', 1], ['boat', [0, (10, 10), 3, False, (255, 255, 0)]])
+#             time.sleep(2)
+#             for viewer in viewerLookup.values():
+#                 viewer.send('upd', ['wind', 0])
+#                 viewer.send('upd', ['boat', [0, (11, 10), 1, True, (255, 255, 0)]])
+#             print(['wind', 0], ['boat', [0, (11, 10), 1, True, (255, 255, 0)]])
+#             time.sleep(2)
+#         except Exception as e:
+#             print(e)
+
+
 ##########################################################################
-s = start_server()
+server = Server()
+game = Game('boards/helford.csv')
+game.dice.outcome = 3
+print(game.dice.outcome)
+game.create_boat(500, pos=(10, 11))
+for boat in game.boats:
+    print(boat)
+# game.create_boat(0, (10, 10), 'P', 3, (255, 255, 0))
+# start_new_thread(test_movement, (1, ))
 while True:
-    conn, addr = s.accept()
+    conn, addr = server.sock.accept()
     print("Connected to:", addr)
     start_new_thread(threaded_client, (conn, connCounter))
     connLookup.update({connCounter: conn})
